@@ -14,8 +14,13 @@ usage()
     echo "  -corelib <CoreLib>      Path to System.Private.CoreLib.dll, default: use the System.Private.CoreLib.dll from the seed CLI"
     echo "  -os <OS>                Operating system (used for corefx build), default: Linux"
     echo "  -rid <Rid>              Runtime identifier including the architecture part (e.g. rhel.6-x64)"
-    echo "  -seedcli <SeedCli>      Seed CLI used to generate the target CLI"
+    echo "  -version <Version>      Force version number that must be in the format [0-9]+.[0-9]+.[0-9]+ - MUTUALLY EXCLUSE with -seedcli"
+    echo "  -seedcli <SeedCli>      Seed CLI used to generate the target CLI - MUTUALLY EXCLUSE with -version"
     echo "  -outputpath <path>      Optional output directory to contain the generated cli and cloned repos, default: <Rid>"
+    echo ""
+    echo "When -version is used, then the latest commit of coreclr, corefx and core-setup default branches is checked out, and -version option value is used to fake the release number. This helps when there have been a fix that you want to have. One and only one of the -version or -seedcli options must be given."
+    echo ""
+    echo "For example, this will build latest core faking the version to be 2.0.99: $0 ... -version 2.0.99"
 }
 
 disable_pax_mprotect()
@@ -99,6 +104,7 @@ __corelib=
 __configuration=debug
 __clangversion=
 __outputpath=
+__version=
 
 while [[ "$1" != "" ]]; do
     lowerI="$(echo $1 | awk '{print tolower($0)}')"
@@ -137,21 +143,44 @@ while [[ "$1" != "" ]]; do
         shift
         __outputpath=`getrealpath $1`
         ;;
+    -version)
+        shift
+        __version=$1
+        __majorversion=$(echo "$__version"|sed -e 's/^\([0-9]\+\)\.[0-9]\+\.[0-9]\+$/\1/')
+        __minorversion=$(echo "$__version"|sed -e 's/^[0-9]\+\.\([0-9]\+\)\.[0-9]\+$/\1/')
+        __patchversion=$(echo "$__version"|sed -e 's/^[0-9]\+\.[0-9]\+\.\([0-9]\+\)$/\1/')
+        if [[ -z "$__majorversion" ]]; then
+            echo "-version option value format must be digits.digits.digits"
+            exit 2
+        fi
+        if [[ -z "$__minorversion" ]]; then
+            echo "-version option value format must be digits.digits.digits"
+            exit 2
+        fi
+        if [[ -z "$__patchversion" ]]; then
+            echo "-version option value format must be digits.digits.digits"
+            exit 2
+        fi
+        ;;
      *)
     echo "Unknown argument to build.sh $1"; exit 1
     esac
     shift
 done
 
+if [ -n "$__seedclipath" -a -n "$__version" ]; then
+    echo "-seedcli and -version are mutually exclusive"
+    exit 2
+fi
+
+if [ -z "$__seedclipath" -a -z "$__version" ]; then
+    echo "One of -seedcli or -version is required"
+    exit 2
+fi
 
 if [[ -z "$__runtime_id" ]]; then
     echo "Missing the required -rid argument"
     exit 2
-fi
-
-if [[ -z "$__seedclipath" ]]; then
-    echo "Missing the required -seedcli argument"
-    exit 3
 fi
 
 __build_arch=${__runtime_id#*-}
@@ -169,31 +198,48 @@ mkdir -p $__outputpath
 
 cd $__runtime_id
 
-cp -r $__seedclipath/* $__outputpath
+if [[ -n "$__seedclipath" ]]; then
+    cp -r $__seedclipath/* $__outputpath
 
-__frameworkversion="2.0.0"
-__sdkversion="2.0.0"
-__fxrversion="2.0.0"
+    __frameworkversion="2.0.0"
+    __sdkversion="2.0.0"
+    __fxrversion="2.0.0"
 
-echo "**** DETECTING VERSIONS IN SEED CLI ****"
+    echo "**** DETECTING VERSIONS IN SEED CLI ****"
 
-__frameworkversion=`get_max_version $__seedclipath/shared/Microsoft.NETCore.App`
-__sdkversion=`get_max_version $__seedclipath/sdk`
-__fxrversion=`get_max_version $__seedclipath/host/fxr`
+    __frameworkversion=`get_max_version $__seedclipath/shared/Microsoft.NETCore.App`
+    __sdkversion=`get_max_version $__seedclipath/sdk`
+    __fxrversion=`get_max_version $__seedclipath/host/fxr`
+
+else
+
+    __frameworkversion=$__version
+    __sdkversion=$__version
+    __fxrversion=$__version
+
+fi
 
 echo "Framework version: $__frameworkversion"
 echo "SDK version:       $__sdkversion"
 echo "FXR version:       $__fxrversion"
 
 __frameworkpath=$__outputpath/shared/Microsoft.NETCore.App/$__frameworkversion
+mkdir -p "${__frameworkpath}"
 
-echo "**** DETECTING GIT COMMIT HASHES ****"
+if [[ -n "$__seedclipath" ]]; then
+    echo "**** DETECTING GIT COMMIT HASHES ****"
 
-# Extract the git commit hashes representig the state of the three repos that
-# the seed cli package was built from
-__coreclrhash=`strings $__seedclipath/shared/Microsoft.NETCore.App/$__frameworkversion/libcoreclr.so | grep "@(#)" | grep -o "[a-f0-9]\{40\}"`
-__corefxhash=`strings $__seedclipath/shared/Microsoft.NETCore.App/$__frameworkversion/System.Native.so | grep "@(#)" | grep -o "[a-f0-9]\{40\}"`
-__coresetuphash=`strings $__seedclipath/dotnet | grep -o "[a-f0-9]\{40\}"`
+    # Extract the git commit hashes representig the state of the three repos that
+    # the seed cli package was built from
+    __coreclrhash=`strings $__seedclipath/shared/Microsoft.NETCore.App/$__frameworkversion/libcoreclr.so | grep "@(#)" | grep -o "[a-f0-9]\{40\}"`
+    __corefxhash=`strings $__seedclipath/shared/Microsoft.NETCore.App/$__frameworkversion/System.Native.so | grep "@(#)" | grep -o "[a-f0-9]\{40\}"`
+    __coresetuphash=`strings $__seedclipath/dotnet | grep -o "[a-f0-9]\{40\}"`
+
+else
+    __coreclrhash=HEAD
+    __corefxhash=HEAD
+    __coresetuphash=HEAD
+fi
 
 echo "coreclr hash:    $__coreclrhash"
 echo "corefx hash:     $__corefxhash"
@@ -205,25 +251,31 @@ echo "core-setup hash: $__coresetuphash"
 if [[ ! -d coreclr ]]; then
     echo "**** CLONING CORECLR REPOSITORY ****"
     git clone https://github.com/dotnet/coreclr.git
-    cd coreclr
-    git checkout $__coreclrhash
-    cd ..
+    if [[ -n "$__coreclrhash" ]]; then
+        cd coreclr
+        git checkout $__coreclrhash
+        cd ..
+    fi
 fi
 
 if [[ ! -d corefx ]]; then
     echo "**** CLONING COREFX REPOSITORY ****"
     git clone https://github.com/dotnet/corefx.git
-    cd  corefx
-    git checkout $__corefxhash
-    cd ..
+    if [[ -n "$__corefxhash" ]]; then
+        cd  corefx
+        git checkout $__corefxhash
+        cd ..
+    fi
 fi
 
 if [[ ! -d core-setup ]]; then
     echo "**** CLONING CORE-SETUP REPOSITORY ****"
     git clone https://github.com/dotnet/core-setup.git
-    cd  core-setup
-    git checkout $__coresetuphash
-    cd ..
+    if [[ -n "$__coresetuphash" ]]; then
+        cd  core-setup
+        git checkout $__coresetuphash
+        cd ..
+    fi
 fi
 
 echo "**** BUILDING CORE-SETUP NATIVE COMPONENTS ****"
@@ -244,6 +296,11 @@ export __corefxbin=$(cat corefx.log | sed -n -e 's/^.*Build files have been writ
 echo "CoreFX binaries will be copied from $__corefxbin"
 
 echo "**** Copying new binaries to dotnetcli/ ****"
+
+# make sure some directories exists
+mkdir -p $__frameworkpath
+mkdir -p $__outputpath/sdk/$__sdkversion
+mkdir -p $__outputpath/host/fxr
 
 # First copy the coreclr repo binaries
 cp $__coreclrbin/*so $__frameworkpath
@@ -283,14 +340,15 @@ fi
 echo "**** Adding new rid to Microsoft.NETCore.App.deps.json ****"
 
 #TODO: add parameter with the parent RID sequence
-
-sed \
-    -e 's/runtime\.linux-x64/runtime.'$__runtime_id'/g' \
-    -e 's/runtimes\/linux-x64/runtimes\/'$__runtime_id'/g' \
-    -e 's/Version=v\([0-9].[0-9]\)\/linux-x64/Version=v\1\/'$__runtime_id'/g' \
-    -e 's/"runtimes": {/&\n    "'$__runtime_id'": [\n      "unix", "unix-x64", "any", "base"\n    ],/g' \
-$__seedclipath/shared/Microsoft.NETCore.App/$__frameworkversion/Microsoft.NETCore.App.deps.json \
->$__frameworkpath/Microsoft.NETCore.App.deps.json
+if [[ -n "$__seedclipath" ]]; then
+    sed \
+        -e 's/runtime\.linux-x64/runtime.'$__runtime_id'/g' \
+        -e 's/runtimes\/linux-x64/runtimes\/'$__runtime_id'/g' \
+        -e 's/Version=v\([0-9].[0-9]\)\/linux-x64/Version=v\1\/'$__runtime_id'/g' \
+        -e 's/"runtimes": {/&\n    "'$__runtime_id'": [\n      "unix", "unix-x64", "any", "base"\n    ],/g' \
+        $__seedclipath/shared/Microsoft.NETCore.App/$__frameworkversion/Microsoft.NETCore.App.deps.json \
+        >$__frameworkpath/Microsoft.NETCore.App.deps.json
+fi
 
 echo "**** Bootstrap CLI was successfully built  ****"
 
